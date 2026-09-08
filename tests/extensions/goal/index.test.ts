@@ -120,7 +120,27 @@ function extensionHarness(options: { branch?: unknown[] } = {}) {
   const edits: (string | undefined)[] = [];
   let activeTools = ["read", "third_party_tool"];
   let branch = options.branch ?? [];
+  const eventListeners = new Map<string, ((data: unknown) => void)[]>();
   const pi = {
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        const all = eventListeners.get(channel) ?? [];
+        all.push(handler);
+        eventListeners.set(channel, all);
+        return () => {
+          const current = eventListeners.get(channel) ?? [];
+          eventListeners.set(
+            channel,
+            current.filter((h) => h !== handler),
+          );
+        };
+      },
+      emit(channel: string, data: unknown) {
+        for (const handler of eventListeners.get(channel) ?? []) {
+          handler(data);
+        }
+      },
+    },
     registerTool(tool: CapturedTool) {
       tools.set(tool.name, tool);
       activeTools = [
@@ -194,11 +214,7 @@ function extensionHarness(options: { branch?: unknown[] } = {}) {
 test("goal lifecycle tools appear only after goal state exists", async () => {
   const h = extensionHarness();
   await h.emit("session_start", { reason: "startup" });
-  assert.deepEqual(h.activeTools(), [
-    "read",
-    "third_party_tool",
-    "create_goal",
-  ]);
+  assert.deepEqual(h.activeTools(), ["read", "third_party_tool"]);
 
   await h.tools
     .get("create_goal")
