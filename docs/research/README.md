@@ -8,6 +8,7 @@ Research records preserve sourced investigation and distinguish observations, in
 
 ## Validated investigations
 
+- [`OPENPI_HARNESS_STRENGTH_PROTOCOL_2026-08-30.md`](OPENPI_HARNESS_STRENGTH_PROTOCOL_2026-08-30.md) — source-scoped research and explicitly labelled future proposals ([PR #306](https://github.com/openpi-dev/openpi/pull/306)).
 - [`OPENPI_ZERO_RESIDENT_SURFACE_DIAGNOSTIC_2026-08-30.md`](OPENPI_ZERO_RESIDENT_SURFACE_DIAGNOSTIC_2026-08-30.md) — source-scoped research and explicitly labelled future proposals ([PR #307](https://github.com/openpi-dev/openpi/pull/307)).
 - [`CAPABILITY_GATEWAY_BOUNDARY_2026-08-30.md`](CAPABILITY_GATEWAY_BOUNDARY_2026-08-30.md) — source-scoped research and explicitly labelled future proposals ([PR #308](https://github.com/openpi-dev/openpi/pull/308)).
 
