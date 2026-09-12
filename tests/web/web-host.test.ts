@@ -127,6 +127,7 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       for (const listener of listeners) listener({ type: "session_start" });
       return {
         cancelled: false,
+        sessionId: sessionManager.getSessionId(),
         ...(options?.commandId ? { commandId: options.commandId } : {}),
       };
     },
@@ -859,7 +860,11 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       }),
     });
     assert.equal(importedSession.status, 201);
-    assert.equal((await importedSession.json()).commandId, "create-imported");
+    assert.deepEqual(await importedSession.json(), {
+      cancelled: false,
+      commandId: "create-imported",
+      sessionId: sessionManager.getSessionId(),
+    });
     assert.equal(runtimeCwd, importedWorkspace.path);
 
     const newSession = await fetch(`${launched.origin}/api/sessions`, {
@@ -868,10 +873,46 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       body: JSON.stringify({ workspacePath: cwd, commandId: "create-current" }),
     });
     assert.equal(newSession.status, 201);
-    assert.equal((await newSession.json()).commandId, "create-current");
+    assert.deepEqual(await newSession.json(), {
+      cancelled: false,
+      commandId: "create-current",
+      sessionId: sessionManager.getSessionId(),
+    });
     assert.equal(runtimeCwd, cwd);
     assert.equal(newSessions, 2);
     assert.deepEqual(creationCommandIds, ["create-imported", "create-current"]);
+    const beforeReplay = (await (
+      await fetch(`${launched.origin}/api/snapshot`, { headers: authorized })
+    ).json()) as { cursor: number };
+    const originalNewSession = runtime.newSession;
+    runtime.newSession = async (_workspacePath, options) => ({
+      cancelled: false,
+      replayed: true,
+      commandId: options?.commandId,
+      sessionId: "older-session",
+    });
+    try {
+      const replay = await fetch(`${launched.origin}/api/sessions`, {
+        method: "POST",
+        headers: authorized,
+        body: JSON.stringify({
+          workspacePath: importedWorkspace.path,
+          commandId: "create-imported",
+        }),
+      });
+      assert.equal(replay.status, 201);
+      const afterReplay = (await (
+        await fetch(`${launched.origin}/api/snapshot`, { headers: authorized })
+      ).json()) as { cursor: number };
+      assert.equal(
+        afterReplay.cursor,
+        beforeReplay.cursor,
+        "a replay is not a new Session transition",
+      );
+      assert.equal(runtimeCwd, cwd);
+    } finally {
+      runtime.newSession = originalNewSession;
+    }
 
     const removeActive = await fetch(
       `${launched.origin}/api/workspaces?path=${encodeURIComponent(cwd)}`,
@@ -992,7 +1033,10 @@ test("serves terminal Sessions through a read-only bounded endpoint", async () =
     getActiveTurn: () => undefined,
     cancelTurn: async (options) => ({ ...options, state: "stale-turn" }),
     sendPrompt: async () => ({ pendingFollowUps: 0 }),
-    newSession: async () => ({ cancelled: false }),
+    newSession: async () => ({
+      cancelled: false,
+      sessionId: runtime.sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
     searchModels: (query, limit) => projectWebModelSearch([], query, limit),
@@ -1126,7 +1170,10 @@ test("an unbound Host exposes no bootstrap Session and rejects prompt bypasses",
       prompts++;
       return { pendingFollowUps: 0 };
     },
-    newSession: async () => ({ cancelled: false }),
+    newSession: async () => ({
+      cancelled: false,
+      sessionId: sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
     searchModels: (query, limit) => projectWebModelSearch([], query, limit),
@@ -1227,7 +1274,10 @@ test("returns accepted only after Pi admits the prompt", async () => {
       await promptAdmitted;
       return { pendingFollowUps: 0 };
     },
-    newSession: async () => ({ cancelled: false }),
+    newSession: async () => ({
+      cancelled: false,
+      sessionId: sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
     searchModels: (query, limit) => projectWebModelSearch([], query, limit),
@@ -1715,7 +1765,10 @@ function testRuntime(
     getActiveTurn: () => undefined,
     cancelTurn: async (options) => ({ ...options, state: "stale-turn" }),
     sendPrompt,
-    newSession: async () => ({ cancelled: false }),
+    newSession: async () => ({
+      cancelled: false,
+      sessionId: sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
     searchModels: (query, limit) => projectWebModelSearch([], query, limit),

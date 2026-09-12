@@ -182,7 +182,10 @@ test("real file evidence, authenticated downloads, edits, refresh and failure st
     setModel: async () => {
       throw new Error("unused");
     },
-    newSession: async () => ({ cancelled: true }),
+    newSession: async () => ({
+      cancelled: true,
+      sessionId: runtime.sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: true }),
     cancelTurn: async (options) => ({ ...options, state: "stale-turn" }),
     subscribe: (listener) => {

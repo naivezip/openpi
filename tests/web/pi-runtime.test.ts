@@ -1215,7 +1215,7 @@ test("dispose waits for pending candidate creation and cleans it before releasin
   }
 });
 
-test("new session projects its command id and activated session path", async () => {
+test("new session projects its command id and stable activated identity", async () => {
   const active = lifecycleRuntime(lifecycleSession("session-a", false));
   const candidateSession = lifecycleSession("session-b", false, 0);
   Object.assign(candidateSession.sessionManager, {
@@ -1250,12 +1250,31 @@ test("new session projects its command id and activated session path", async () 
     assert.deepEqual(result, {
       cancelled: false,
       commandId: "create-command",
+      sessionId: "session-b",
       sessionPath: "/tmp/session-b.jsonl",
     });
+    const eventCount = events.length;
+    const replay = await harness.newSession(process.cwd(), {
+      commandId: "create-command",
+    });
+    assert.deepEqual(replay, { ...result, replayed: true });
+    assert.equal(
+      events.length,
+      eventCount,
+      "receipt replay must not activate another Session",
+    );
+    await assert.rejects(
+      harness.newSession("/different-workspace", {
+        commandId: "create-command",
+      }),
+      /another workspace/,
+    );
+
     assert.deepEqual(events.at(-1), {
       type: "session_switched",
       detail: {
         commandId: "create-command",
+        sessionId: "session-b",
         sessionPath: "/tmp/session-b.jsonl",
       },
     });

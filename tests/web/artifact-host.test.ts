@@ -25,7 +25,10 @@ test("artifact HTTP access authenticates, binds a Session, serves exact revision
     dispose: async () => undefined,
     sendPrompt: async () => ({ pendingFollowUps: 0 }),
     cancelTurn: async (options) => ({ ...options, state: "stale-turn" }),
-    newSession: async () => ({ cancelled: true }),
+    newSession: async () => ({
+      cancelled: true,
+      sessionId: runtime.sessionManager.getSessionId(),
+    }),
     switchSession: async () => ({ cancelled: true }),
     setModel: async () => {
       throw new Error("unused");

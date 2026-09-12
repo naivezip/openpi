@@ -111,7 +111,9 @@ export interface WebSessionCreationOptions {
 
 export interface WebSessionCreationResult {
   cancelled: boolean;
+  replayed?: boolean;
   commandId?: string;
+  sessionId: string;
   sessionPath?: string;
 }
 

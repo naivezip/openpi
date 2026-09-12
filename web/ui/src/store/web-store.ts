@@ -90,7 +90,14 @@ interface SessionActivation {
   kind: "create" | "select";
   commandId?: string;
   expectedPath: string | null;
-  observedPath?: string | null;
+  expectedSessionId?: string;
+}
+
+interface SessionTarget {
+  epoch: number;
+  sessionId: string;
+  sessionPath: string | null;
+  workspacePath: string;
 }
 
 export interface CommandDiscoveryState {
@@ -154,7 +161,7 @@ export interface WebStoreActions {
   setWorkspace: (path: string | null) => void;
   renameWorkspace: (path: string, name: string) => Promise<void>;
   removeWorkspace: (path: string) => Promise<void>;
-  createSession: (workspacePath: string) => Promise<boolean>;
+  createSession: (workspacePath: string) => Promise<SessionTarget | null>;
   selectSession: (path: string) => Promise<void>;
   renameSession: (path: string, name: string) => Promise<void>;
   archiveSession: (path: string) => Promise<void>;
@@ -221,6 +228,7 @@ export function createWebStore(
     optimisticKey: string;
   } | null = null;
   let sessionActivation: SessionActivation | null = null;
+  let creationRetry: { workspacePath: string; commandId: string } | null = null;
   let sessionSelectionTail = Promise.resolve();
   let refreshTimer: number | null = null;
   let refreshInFlight = false;
@@ -304,6 +312,19 @@ export function createWebStore(
       set({
         notice: error instanceof Error ? error.message : String(error),
       });
+    };
+
+    const targetMatchesSnapshot = (target: SessionTarget) => {
+      const snapshot = get().snapshot;
+      return (
+        target.epoch === sessionEpoch &&
+        get().selectedWorkspace === target.workspacePath &&
+        snapshot?.currentSessionId === target.sessionId &&
+        snapshot.selectedSession?.id === target.sessionId &&
+        snapshot.selectedSession.cwd === target.workspacePath &&
+        (!target.sessionPath ||
+          snapshot.selectedSession.path === target.sessionPath)
+      );
     };
 
     const clearCommandDiscovery = () => {
@@ -619,16 +640,19 @@ export function createWebStore(
           sessionActivation?.kind === "create" &&
           sessionActivation.commandId === eventCommandId &&
           event.type === "session_switched" &&
-          typeof eventPath === "string" &&
-          !knownPath
+          typeof eventSessionId === "string" &&
+          (!sessionActivation.expectedSessionId ||
+            sessionActivation.expectedSessionId === eventSessionId) &&
+          (typeof eventPath !== "string" || !knownPath)
         ) {
-          sessionActivation.observedPath = eventPath;
           belongs = true;
         } else if (
           sessionActivation?.kind === "create" &&
           sessionActivation.commandId === eventCommandId &&
           event.type === "session_created" &&
-          typeof sessionActivation.observedPath === "string"
+          typeof eventSessionId === "string" &&
+          (!sessionActivation.expectedSessionId ||
+            eventSessionId === sessionActivation.expectedSessionId)
         ) {
           belongs = true;
         }
@@ -816,7 +840,7 @@ export function createWebStore(
             cursor: get().cursor ?? 0,
             onConnected: () => {
               reconnectDelay = 500;
-              set({ connection: "connected", notice: null });
+              set({ connection: "connected" });
             },
             onEvent: applyRuntimeEvent,
             onHeartbeat: () => scheduleSnapshotRefresh(0),
@@ -973,6 +997,7 @@ export function createWebStore(
         if (path === current.selectedWorkspace && !current.sessionSwitching)
           return;
         ++sessionEpoch;
+        creationRetry = null;
         resetThinking();
         clearCommandDiscovery();
         promptAdmissionToken = null;
@@ -1019,14 +1044,18 @@ export function createWebStore(
         }
       },
       async createSession(workspacePath) {
-        if (!workspacePath || get().modelSelectionPending) return false;
+        if (!workspacePath || get().modelSelectionPending) return null;
         const current = get();
         const epoch = ++sessionEpoch;
         resetThinking();
         clearCommandDiscovery();
         const commandId =
+          (creationRetry?.workspacePath === workspacePath
+            ? creationRetry.commandId
+            : undefined) ??
           globalThis.crypto?.randomUUID?.() ??
           `web-create-${Date.now()}-${epoch}`;
+        creationRetry = { workspacePath, commandId };
         promptAdmissionToken = null;
         promptAdmission = null;
         set({
@@ -1046,7 +1075,7 @@ export function createWebStore(
           workspaceDraft: true,
           sessionSwitching: true,
         });
-        let created = false;
+        let created: SessionTarget | null = null;
         const creation = sessionSelectionTail.then(async () => {
           if (epoch !== sessionEpoch) return;
           sessionActivation = {
@@ -1054,20 +1083,33 @@ export function createWebStore(
             epoch,
             expectedPath: null,
             kind: "create",
-            observedPath: null,
           };
           try {
-            const receipt = await client.createSession(
-              workspacePath,
-              commandId,
-            );
+            const result = await client.createSession(workspacePath, commandId);
             if (epoch !== sessionEpoch) return;
-            if (receipt.cancelled || !receipt.sessionPath) {
+            if (
+              result.cancelled ||
+              result.commandId !== commandId ||
+              typeof result.sessionId !== "string" ||
+              !result.sessionId ||
+              result.sessionId.length > 128 ||
+              (result.sessionPath !== undefined && !result.sessionPath)
+            ) {
               throw new Error(
-                "Session creation was not confirmed. Please try again.",
+                "Session creation did not return a valid target identity.",
               );
             }
-            set({ selectedPath: null });
+            const target: SessionTarget = {
+              epoch,
+              sessionId: result.sessionId,
+              sessionPath: result.sessionPath ?? null,
+              workspacePath,
+            };
+            if (sessionActivation?.epoch === epoch) {
+              sessionActivation.expectedSessionId = target.sessionId;
+              sessionActivation.expectedPath = target.sessionPath;
+            }
+            set({ selectedPath: target.sessionPath });
             let refreshed = await actions.refreshSnapshot({ epoch });
             if (!refreshed && epoch === sessionEpoch) {
               // A Session event may start a newer snapshot while this
@@ -1081,23 +1123,31 @@ export function createWebStore(
                 "The created Session could not be confirmed. Please try again.",
               );
             }
-            const selected = get().snapshot?.selectedSession;
-            // A successful HTTP response alone cannot authorize a prompt:
-            // another browser may have activated a different Session meanwhile.
-            if (
-              !selected ||
-              selected.path !== receipt.sessionPath ||
-              selected.cwd !== workspacePath ||
-              selected.id !== get().snapshot?.currentSessionId
-            ) {
-              throw new Error(
-                "The created Session is no longer active in the selected workspace. Please try again.",
+            if (!targetMatchesSnapshot(target)) {
+              creationRetry = null;
+              showError(
+                new Error(
+                  "The created Session is no longer active in the selected workspace. Please try again.",
+                ),
               );
+              return;
             }
             set({ workspaceDraft: false, notice: null });
             const draft = get().draftModel;
-            const sessionId = selected.id;
-            created = !draft || (await applyModel(draft, epoch, sessionId));
+            if (draft && !(await applyModel(draft, epoch, target.sessionId))) {
+              return;
+            }
+            if (get().workspaceDraft || !targetMatchesSnapshot(target)) {
+              creationRetry = null;
+              showError(
+                new Error(
+                  "The created Session is no longer active in the selected workspace. Please try again.",
+                ),
+              );
+              return;
+            }
+            created = target;
+            creationRetry = null;
           } catch (error) {
             if (epoch !== sessionEpoch) return;
             set({ selectedPath: null });
@@ -1111,10 +1161,11 @@ export function createWebStore(
         });
         sessionSelectionTail = creation.catch(() => undefined);
         await creation;
-        return created && epoch === sessionEpoch;
+        return epoch === sessionEpoch ? created : null;
       },
       async selectSession(path) {
         if (!path) return;
+        creationRetry = null;
         const current = get();
         clearCommandDiscovery();
         set({
@@ -1352,15 +1403,34 @@ export function createWebStore(
         }
         const creating =
           get().workspaceDraft || !get().snapshot?.selectedSession?.id;
-        if (creating && !(await actions.createSession(workspace))) return false;
+        const createdTarget = creating
+          ? await actions.createSession(workspace)
+          : null;
+        if (creating && !createdTarget) {
+          if (!get().notice) {
+            set({
+              notice:
+                "The active Session changed before the first message was sent. Your message was not sent.",
+            });
+          }
+          return false;
+        }
         if (creating && get().draftModel) return false;
-        const sessionId = get().snapshot?.selectedSession?.id;
+        const selectedSession = get().snapshot?.selectedSession;
+        const target =
+          createdTarget ??
+          (selectedSession
+            ? {
+                epoch: sessionEpoch,
+                sessionId: selectedSession.id,
+                sessionPath: selectedSession.path,
+                workspacePath: workspace,
+              }
+            : null);
         if (
-          !sessionId ||
+          !target ||
           get().workspaceDraft ||
-          get().selectedWorkspace !== workspace ||
-          get().snapshot?.selectedSession?.cwd !== workspace ||
-          sessionId !== get().snapshot?.currentSessionId ||
+          !targetMatchesSnapshot(target) ||
           get().sessionSwitching ||
           get().promptAdmissionPending ||
           (replacement &&
@@ -1370,16 +1440,12 @@ export function createWebStore(
         ) {
           return false;
         }
-        const epoch = sessionEpoch;
+        const { epoch, sessionId } = target;
         const draft = get().draftModel;
         if (draft && !(await applyModel(draft, epoch, sessionId))) return false;
         if (
-          epoch !== sessionEpoch ||
-          sessionId !== get().snapshot?.selectedSession?.id ||
-          sessionId !== get().snapshot?.currentSessionId ||
           get().workspaceDraft ||
-          get().selectedWorkspace !== workspace ||
-          get().snapshot?.selectedSession?.cwd !== workspace ||
+          !targetMatchesSnapshot(target) ||
           (replacement &&
             (get().promptAdmissionRecovery?.commandId !==
               replacement.commandId ||
