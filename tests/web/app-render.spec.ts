@@ -1321,3 +1321,284 @@ it("shows empty and error feedback for bounded model search", () => {
   );
   expect(screen.getByRole("alert").textContent).toBe("Model lookup failed");
 });
+
+it("renders explicit choices for an unknown prompt admission", () => {
+  const snapshot = activeSnapshot();
+  snapshot.runtime.status = "idle";
+  const store = createWebStore();
+  renderWithI18n(
+    createElement(Composer, {
+      snapshot,
+      selectedWorkspace: "/tmp",
+      sessionSwitching: false,
+      promptAdmissionPending: false,
+      promptAdmissionRecovery: {
+        sessionId: "session",
+        content: "keep this draft",
+        commandId: "unknown-command",
+        optimisticKey: "optimistic-unknown-command",
+        phase: "ready",
+      },
+      liveRunning: false,
+      landing: false,
+      activeTurn: null,
+      turnCancellationPending: false,
+      turnTerminalStatus: null,
+      pendingFollowUpsReceipt: null,
+      thinkingPendingLevel: null,
+      actions: store.getState().actions,
+    }),
+  );
+
+  expect(screen.getByRole("alert")).toBeTruthy();
+  expect(screen.getByDisplayValue("keep this draft")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Refresh status" })).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "Don't resend for now" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByRole("button", { name: "Send as new message" }),
+  ).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Send" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+});
+
+it("requires another canonical check after admission verification fails", () => {
+  const snapshot = activeSnapshot();
+  snapshot.runtime.status = "idle";
+  const store = createWebStore();
+  const check = vi.fn(async () => {});
+  renderWithI18n(
+    createElement(Composer, {
+      snapshot,
+      selectedWorkspace: "/tmp",
+      sessionSwitching: false,
+      promptAdmissionPending: false,
+      promptAdmissionRecovery: {
+        sessionId: "session",
+        content: "keep this draft",
+        commandId: "unknown-command",
+        optimisticKey: "optimistic-unknown-command",
+        phase: "verification-failed",
+      },
+      liveRunning: false,
+      landing: false,
+      activeTurn: null,
+      turnCancellationPending: false,
+      turnTerminalStatus: null,
+      pendingFollowUpsReceipt: null,
+      thinkingPendingLevel: null,
+      actions: {
+        ...store.getState().actions,
+        checkPromptAdmissionRecovery: check,
+      },
+    }),
+  );
+
+  const sendAsNew = screen.getByRole<HTMLButtonElement>("button", {
+    name: "Send as new message",
+  });
+  expect(sendAsNew.disabled).toBe(true);
+  expect(
+    screen.getByText(
+      "Could not refresh the latest Session history and runtime status. Check again before sending as a new message.",
+    ),
+  ).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+  expect(check).toHaveBeenCalledOnce();
+});
+
+it.each(["keep this draft", "  keep this draft  ", "\nkeep this draft\n"])(
+  "clears a recovered draft matching admitted content %j when late evidence arrives",
+  (draft) => {
+    const snapshot = activeSnapshot();
+    snapshot.runtime.status = "idle";
+    const store = createWebStore();
+    const acknowledge = vi.fn();
+    const baseProps = {
+      snapshot,
+      selectedWorkspace: "/tmp",
+      sessionSwitching: false,
+      promptAdmissionPending: false,
+      promptAdmissionRecovery: {
+        sessionId: "session",
+        content: "keep this draft",
+        commandId: "unknown-command",
+        optimisticKey: "optimistic-unknown-command",
+        phase: "ready" as const,
+      },
+      liveRunning: false,
+      landing: false,
+      activeTurn: null,
+      turnCancellationPending: false,
+      turnTerminalStatus: null,
+      pendingFollowUpsReceipt: null,
+      thinkingPendingLevel: null,
+      actions: {
+        ...store.getState().actions,
+        acknowledgePromptAdmissionResolution: acknowledge,
+      },
+    };
+    const { rerender } = renderWithI18n(createElement(Composer, baseProps));
+    const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
+      name: i18n.t("describeTask"),
+    });
+    expect(input.value).toBe("keep this draft");
+    fireEvent.change(input, { target: { value: draft } });
+
+    rerender(
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(Composer, {
+          ...baseProps,
+          promptAdmissionRecovery: null,
+          promptAdmissionResolution: {
+            commandId: "unknown-command",
+            content: "keep this draft",
+          },
+        }),
+      ),
+    );
+
+    expect(input.value).toBe("");
+    expect(acknowledge).toHaveBeenCalledWith("unknown-command");
+  },
+);
+
+it("keeps an emptied recovery draft empty across verification and submission phases", () => {
+  const snapshot = activeSnapshot();
+  snapshot.runtime.status = "idle";
+  const store = createWebStore();
+  const sendAsNew = vi.fn(async () => false);
+  const baseProps = {
+    snapshot,
+    selectedWorkspace: "/tmp",
+    sessionSwitching: false,
+    promptAdmissionPending: false,
+    promptAdmissionRecovery: {
+      sessionId: "session",
+      content: "original",
+      commandId: "unknown-command",
+      optimisticKey: "optimistic-unknown-command",
+      phase: "verification-failed" as const,
+    },
+    liveRunning: false,
+    landing: false,
+    activeTurn: null,
+    turnCancellationPending: false,
+    turnTerminalStatus: null,
+    pendingFollowUpsReceipt: null,
+    thinkingPendingLevel: null,
+    actions: { ...store.getState().actions, sendPromptAsNew: sendAsNew },
+  };
+  const { rerender } = renderWithI18n(createElement(Composer, baseProps));
+  const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
+    name: i18n.t("describeTask"),
+  });
+  expect(input.value).toBe("original");
+  fireEvent.change(input, { target: { value: "" } });
+
+  for (const phase of [
+    "checking",
+    "verification-failed",
+    "checking",
+    "ready",
+    "submitting",
+    "ready",
+  ] as const) {
+    rerender(
+      createElement(
+        I18nextProvider,
+        { i18n },
+        createElement(Composer, {
+          ...baseProps,
+          promptAdmissionRecovery: {
+            ...baseProps.promptAdmissionRecovery,
+            phase,
+          },
+        }),
+      ),
+    );
+    expect(input.value).toBe("");
+    const button = screen.getByRole<HTMLButtonElement>("button", {
+      name: phase === "submitting" ? "Sending…" : "Send as new message",
+    });
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(sendAsNew).not.toHaveBeenCalled();
+  }
+
+  rerender(
+    createElement(
+      I18nextProvider,
+      { i18n },
+      createElement(Composer, {
+        ...baseProps,
+        promptAdmissionRecovery: {
+          ...baseProps.promptAdmissionRecovery,
+          commandId: "next-command",
+          optimisticKey: "optimistic-next-command",
+          content: "next draft",
+        },
+      }),
+    ),
+  );
+  expect(input.value).toBe("next draft");
+});
+
+it("preserves an edited recovered draft when late evidence arrives", () => {
+  const snapshot = activeSnapshot();
+  snapshot.runtime.status = "idle";
+  const store = createWebStore();
+  const acknowledge = vi.fn();
+  const baseProps = {
+    snapshot,
+    selectedWorkspace: "/tmp",
+    sessionSwitching: false,
+    promptAdmissionPending: false,
+    promptAdmissionRecovery: {
+      sessionId: "session",
+      content: "original",
+      commandId: "unknown-command",
+      optimisticKey: "optimistic-unknown-command",
+      phase: "ready" as const,
+    },
+    liveRunning: false,
+    landing: false,
+    activeTurn: null,
+    turnCancellationPending: false,
+    turnTerminalStatus: null,
+    pendingFollowUpsReceipt: null,
+    thinkingPendingLevel: null,
+    actions: {
+      ...store.getState().actions,
+      acknowledgePromptAdmissionResolution: acknowledge,
+    },
+  };
+  const { rerender } = renderWithI18n(createElement(Composer, baseProps));
+  const input = screen.getByRole<HTMLTextAreaElement>("textbox", {
+    name: i18n.t("describeTask"),
+  });
+  fireEvent.change(input, { target: { value: "edited" } });
+
+  rerender(
+    createElement(
+      I18nextProvider,
+      { i18n },
+      createElement(Composer, {
+        ...baseProps,
+        promptAdmissionRecovery: null,
+        promptAdmissionResolution: {
+          commandId: "unknown-command",
+          content: "original",
+        },
+      }),
+    ),
+  );
+
+  expect(input.value).toBe("edited");
+  expect(acknowledge).toHaveBeenCalledWith("unknown-command");
+});

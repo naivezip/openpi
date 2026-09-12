@@ -34,6 +34,8 @@ interface ComposerProps {
   selectedWorkspace: string | null;
   sessionSwitching: boolean;
   promptAdmissionPending: boolean;
+  promptAdmissionRecovery?: WebStoreState["promptAdmissionRecovery"];
+  promptAdmissionResolution?: WebStoreState["promptAdmissionResolution"];
   liveRunning: boolean;
   landing: boolean;
   actions: WebStoreActions;
@@ -62,6 +64,7 @@ export function Composer(props: ComposerProps) {
   const [menuDismissed, setMenuDismissed] = useState(false);
   const [activeCommand, setActiveCommand] = useState(0);
   const textarea = useRef<HTMLTextAreaElement>(null);
+  const restoredRecoveryCommandId = useRef<string | null>(null);
   const commandMenuWasOpen = useRef(false);
   const selected = props.snapshot?.selectedSession;
   const active = Boolean(
@@ -139,6 +142,36 @@ export function Composer(props: ComposerProps) {
     setActiveCommand(firstAvailable >= 0 ? firstAvailable : 0);
   }, [filteredCommands]);
 
+  useEffect(() => {
+    const recovery = props.promptAdmissionRecovery;
+    const commandId = recovery?.commandId ?? null;
+    if (restoredRecoveryCommandId.current === commandId) return;
+    restoredRecoveryCommandId.current = commandId;
+    if (!recovery) return;
+    setPrompt((current) => current || recovery.content);
+  }, [props.promptAdmissionRecovery]);
+
+  useEffect(() => {
+    const resolution = props.promptAdmissionResolution;
+    if (!resolution) return;
+    if (prompt.trim() === resolution.content) {
+      setPrompt("");
+      if (textarea.current) {
+        textarea.current.style.height = "auto";
+        textarea.current.style.overflowY = "hidden";
+      }
+    }
+    props.actions.acknowledgePromptAdmissionResolution(resolution.commandId);
+  }, [prompt, props.actions, props.promptAdmissionResolution]);
+
+  const clearPrompt = () => {
+    setPrompt("");
+    if (textarea.current) {
+      textarea.current.style.height = "auto";
+      textarea.current.style.overflowY = "hidden";
+    }
+  };
+
   const resize = (element: HTMLTextAreaElement) => {
     element.style.height = "auto";
     element.style.height = `${Math.min(element.scrollHeight, 220)}px`;
@@ -152,12 +185,12 @@ export function Composer(props: ComposerProps) {
       return;
     }
     if (await props.actions.sendPrompt(prompt)) {
-      setPrompt("");
-      if (textarea.current) {
-        textarea.current.style.height = "auto";
-        textarea.current.style.overflowY = "hidden";
-      }
+      clearPrompt();
     }
+  };
+
+  const sendAsNew = async () => {
+    if (await props.actions.sendPromptAsNew(prompt)) clearPrompt();
   };
 
   const completeCommand = (command: (typeof filteredCommands)[number]) => {
@@ -310,6 +343,52 @@ export function Composer(props: ComposerProps) {
             hasChevron
           />
         </div>
+      )}
+      {props.promptAdmissionRecovery && (
+        <section className="prompt-recovery" role="alert">
+          <div>
+            <strong>{t("promptAdmissionUnknown")}</strong>
+            <span>
+              {props.promptAdmissionRecovery.phase === "checking"
+                ? t("promptAdmissionCheckingDetail")
+                : props.promptAdmissionRecovery.phase === "verification-failed"
+                  ? t("promptAdmissionVerificationFailedDetail")
+                  : t("promptAdmissionUnknownDetail")}
+            </span>
+          </div>
+          <div className="prompt-recovery-actions">
+            <button
+              type="button"
+              disabled={props.promptAdmissionRecovery.phase === "submitting"}
+              onClick={props.actions.abandonPromptAdmission}
+            >
+              {t("abandonAdmission")}
+            </button>
+            {props.promptAdmissionRecovery.phase === "verification-failed" && (
+              <button
+                type="button"
+                onClick={() =>
+                  void props.actions.checkPromptAdmissionRecovery()
+                }
+              >
+                {t("retryAdmissionCheck")}
+              </button>
+            )}
+            <button
+              type="button"
+              className="primary"
+              disabled={
+                props.promptAdmissionRecovery.phase !== "ready" ||
+                !prompt.trim()
+              }
+              onClick={() => void sendAsNew()}
+            >
+              {props.promptAdmissionRecovery.phase === "submitting"
+                ? t("sendingAsNew")
+                : t("sendAsNew")}
+            </button>
+          </div>
+        </section>
       )}
       <form
         className={`composer ${props.selectedWorkspace ? "" : "dormant"}`}
@@ -482,6 +561,8 @@ export function Composer(props: ComposerProps) {
                   !canCompose ||
                   !props.selectedWorkspace ||
                   props.promptAdmissionPending ||
+                  Boolean(props.promptAdmissionRecovery) ||
+                  Boolean(props.promptAdmissionResolution) ||
                   !prompt.trim()
                 }
               >

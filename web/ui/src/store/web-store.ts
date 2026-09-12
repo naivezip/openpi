@@ -72,6 +72,19 @@ export interface LiveEntry {
   message: WebLiveMessage;
 }
 
+export interface PromptAdmissionRecovery {
+  sessionId: string;
+  content: string;
+  commandId: string;
+  optimisticKey: string;
+  phase: "checking" | "verification-failed" | "ready" | "submitting";
+}
+
+export interface PromptAdmissionResolution {
+  commandId: string;
+  content: string;
+}
+
 interface SessionActivation {
   epoch: number;
   kind: "create" | "select";
@@ -119,6 +132,8 @@ export interface WebStoreState {
   thinkingStarts: Record<string, number>;
   thinkingDurations: Record<string, number>;
   promptAdmissionPending: boolean;
+  promptAdmissionRecovery: PromptAdmissionRecovery | null;
+  promptAdmissionResolution: PromptAdmissionResolution | null;
   sessionSwitching: boolean;
   scrollToBottom: number;
   // Optimistic display only; the confirmed value lives in snapshot.thinking.
@@ -150,6 +165,10 @@ export interface WebStoreActions {
   selectThinking: (level: string) => void;
   cancelActiveTurn: () => Promise<void>;
   sendPrompt: (content: string) => Promise<boolean>;
+  checkPromptAdmissionRecovery: () => Promise<void>;
+  sendPromptAsNew: (content: string) => Promise<boolean>;
+  abandonPromptAdmission: () => void;
+  acknowledgePromptAdmissionResolution: (commandId: string) => void;
   discoverCommands: () => Promise<void>;
   clearCommandDiscovery: () => void;
   setQuery: (query: string) => void;
@@ -512,6 +531,45 @@ export function createWebStore(
       if (current.cursor !== null && event.sequence <= current.cursor) return;
       set({ cursor: event.sequence });
 
+      const recovery = current.promptAdmissionRecovery;
+      const recoveryCommandId = recovery?.commandId;
+      if (
+        typeof detail.commandId === "string" &&
+        detail.commandId === recoveryCommandId &&
+        [
+          "prompt_accepted",
+          "prompt_failed",
+          "prompt_settled",
+          "turn_started",
+          "turn_settled",
+        ].includes(event.type)
+      ) {
+        const handled = event.type !== "prompt_failed";
+        set({
+          promptAdmissionRecovery: null,
+          promptAdmissionResolution:
+            handled && recovery
+              ? {
+                  commandId: recovery.commandId,
+                  content: recovery.content,
+                }
+              : current.promptAdmissionResolution,
+          liveMessages:
+            handled &&
+            recovery &&
+            !current.liveMessages.some(
+              (entry) => entry.key === recovery.optimisticKey,
+            )
+              ? [
+                  ...current.liveMessages,
+                  {
+                    key: recovery.optimisticKey,
+                    message: { role: "user", content: recovery.content },
+                  },
+                ].slice(-8)
+              : current.liveMessages,
+        });
+      }
       if (event.type === "runtime_changed") set(resetModelSearch());
       if (event.type === "runtime_changed") clearCommandDiscovery();
 
@@ -584,6 +642,13 @@ export function createWebStore(
           set({
             ...resetLivePatch(),
             promptAdmissionPending: false,
+            promptAdmissionRecovery: null,
+            promptAdmissionResolution: recovery
+              ? {
+                  commandId: recovery.commandId,
+                  content: recovery.content,
+                }
+              : current.promptAdmissionResolution,
             selectedPath: typeof eventPath === "string" ? eventPath : null,
             draftModel: current.workspaceDraft ? current.draftModel : null,
             modelSelectionPending: false,
@@ -858,11 +923,11 @@ export function createWebStore(
                 : Math.max(get().cursor ?? 0, snapshot.cursor),
             activeTurn: snapshot.runtime.activeTurn ?? null,
             livePhase:
-              snapshot.runtime.status !== "running" &&
-              !get().promptAdmissionPending &&
-              !promptAdmission
-                ? "idle"
-                : get().livePhase,
+              snapshot.runtime.status === "running"
+                ? "running"
+                : !get().promptAdmissionPending && !promptAdmission
+                  ? "idle"
+                  : get().livePhase,
             liveRetry:
               snapshot.runtime.status !== "running" &&
               !get().promptAdmissionPending &&
@@ -920,6 +985,13 @@ export function createWebStore(
           sessionSwitching: false,
           modelSelectionPending: false,
           promptAdmissionPending: false,
+          promptAdmissionRecovery: null,
+          promptAdmissionResolution: current.promptAdmissionRecovery
+            ? {
+                commandId: current.promptAdmissionRecovery.commandId,
+                content: current.promptAdmissionRecovery.content,
+              }
+            : current.promptAdmissionResolution,
           notice: null,
         });
       },
@@ -948,6 +1020,7 @@ export function createWebStore(
       },
       async createSession(workspacePath) {
         if (!workspacePath || get().modelSelectionPending) return false;
+        const current = get();
         const epoch = ++sessionEpoch;
         resetThinking();
         clearCommandDiscovery();
@@ -961,6 +1034,13 @@ export function createWebStore(
           ...resetModelSearch(),
           mobileSidebarOpen: false,
           promptAdmissionPending: false,
+          promptAdmissionRecovery: null,
+          promptAdmissionResolution: current.promptAdmissionRecovery
+            ? {
+                commandId: current.promptAdmissionRecovery.commandId,
+                content: current.promptAdmissionRecovery.content,
+              }
+            : current.promptAdmissionResolution,
           selectedPath: null,
           selectedWorkspace: workspacePath,
           workspaceDraft: true,
@@ -1035,6 +1115,7 @@ export function createWebStore(
       },
       async selectSession(path) {
         if (!path) return;
+        const current = get();
         clearCommandDiscovery();
         set({
           ...resetModelSearch(),
@@ -1050,6 +1131,13 @@ export function createWebStore(
           ...resetLivePatch(),
           mobileSidebarOpen: false,
           promptAdmissionPending: false,
+          promptAdmissionRecovery: null,
+          promptAdmissionResolution: current.promptAdmissionRecovery
+            ? {
+                commandId: current.promptAdmissionRecovery.commandId,
+                content: current.promptAdmissionRecovery.content,
+              }
+            : current.promptAdmissionResolution,
           selectedPath: path,
           sessionSwitching: true,
         });
@@ -1246,14 +1334,19 @@ export function createWebStore(
       },
       async sendPrompt(rawContent) {
         const content = rawContent.trim();
-        const workspace = get().selectedWorkspace;
+        const initial = get();
+        const recovery = initial.promptAdmissionRecovery;
+        const replacement = recovery?.phase === "submitting" ? recovery : null;
+        const workspace = initial.selectedWorkspace;
         if (
           !workspace ||
           !content ||
-          get().sessionSwitching ||
-          get().promptAdmissionPending ||
-          get().modelSelectionPending ||
-          get().thinkingPendingLevel !== null
+          initial.sessionSwitching ||
+          initial.promptAdmissionPending ||
+          (recovery && !replacement) ||
+          initial.promptAdmissionResolution ||
+          initial.modelSelectionPending ||
+          initial.thinkingPendingLevel !== null
         ) {
           return false;
         }
@@ -1269,7 +1362,11 @@ export function createWebStore(
           get().snapshot?.selectedSession?.cwd !== workspace ||
           sessionId !== get().snapshot?.currentSessionId ||
           get().sessionSwitching ||
-          get().promptAdmissionPending
+          get().promptAdmissionPending ||
+          (replacement &&
+            (get().promptAdmissionRecovery?.commandId !==
+              replacement.commandId ||
+              get().promptAdmissionRecovery?.phase !== "submitting"))
         ) {
           return false;
         }
@@ -1282,7 +1379,11 @@ export function createWebStore(
           sessionId !== get().snapshot?.currentSessionId ||
           get().workspaceDraft ||
           get().selectedWorkspace !== workspace ||
-          get().snapshot?.selectedSession?.cwd !== workspace
+          get().snapshot?.selectedSession?.cwd !== workspace ||
+          (replacement &&
+            (get().promptAdmissionRecovery?.commandId !==
+              replacement.commandId ||
+              get().promptAdmissionRecovery?.phase !== "submitting"))
         )
           return false;
         const admission = ++promptAdmissionSequence;
@@ -1325,12 +1426,46 @@ export function createWebStore(
           set({
             ...promptAcceptedLivePatch(settled, get().livePhase),
             pendingFollowUpsReceipt: receipt.pendingFollowUps ?? null,
+            ...(replacement &&
+            get().promptAdmissionRecovery?.commandId === replacement.commandId
+              ? { promptAdmissionRecovery: null }
+              : {}),
           });
           scheduleSnapshotRefresh(120);
           return true;
         } catch (error) {
           if (epoch !== sessionEpoch || promptAdmissionToken !== admission)
             return false;
+          if (
+            error instanceof WebApiError &&
+            error.code === "COMMAND_ADMISSION_UNKNOWN" &&
+            promptAdmission?.commandId === commandId
+          ) {
+            const recovery = promptAdmission;
+            promptAdmission = null;
+            set({
+              liveRunning: false,
+              livePhase: "idle",
+              liveRetry: null,
+              notice: null,
+              promptAdmissionPending: false,
+              promptAdmissionRecovery: { ...recovery, phase: "checking" },
+            });
+            const refreshed = await actions.refreshSnapshot({
+              resetCursor: true,
+              epoch,
+            });
+            const currentRecovery = get().promptAdmissionRecovery;
+            if (currentRecovery?.commandId === commandId) {
+              set({
+                promptAdmissionRecovery: {
+                  ...currentRecovery,
+                  phase: refreshed ? "ready" : "verification-failed",
+                },
+              });
+            }
+            return false;
+          }
           const knownRejection =
             error instanceof WebApiError &&
             [
@@ -1367,6 +1502,79 @@ export function createWebStore(
             set({ promptAdmissionPending: false });
           }
         }
+      },
+      async checkPromptAdmissionRecovery() {
+        const recovery = get().promptAdmissionRecovery;
+        if (!recovery || recovery.phase !== "verification-failed") return;
+        const epoch = sessionEpoch;
+        set({
+          notice: null,
+          promptAdmissionRecovery: { ...recovery, phase: "checking" },
+        });
+        const refreshed = await actions.refreshSnapshot({
+          resetCursor: true,
+          epoch,
+        });
+        const currentRecovery = get().promptAdmissionRecovery;
+        if (
+          currentRecovery?.commandId === recovery.commandId &&
+          currentRecovery.phase === "checking"
+        ) {
+          set({
+            promptAdmissionRecovery: {
+              ...currentRecovery,
+              phase: refreshed ? "ready" : "verification-failed",
+            },
+          });
+        }
+      },
+      async sendPromptAsNew(rawContent) {
+        const recovery = get().promptAdmissionRecovery;
+        if (
+          !recovery ||
+          recovery.phase !== "ready" ||
+          recovery.sessionId !== get().snapshot?.selectedSession?.id
+        ) {
+          return false;
+        }
+        const content = rawContent.trim();
+        if (!content) return false;
+        set({
+          promptAdmissionRecovery: { ...recovery, phase: "submitting" },
+          notice: null,
+        });
+        let admitted = false;
+        try {
+          admitted = await actions.sendPrompt(content);
+          return admitted;
+        } finally {
+          const currentRecovery = get().promptAdmissionRecovery;
+          if (
+            currentRecovery?.commandId === recovery.commandId &&
+            currentRecovery.phase === "submitting"
+          ) {
+            set({
+              promptAdmissionRecovery: admitted
+                ? null
+                : { ...currentRecovery, phase: "ready" },
+            });
+          }
+        }
+      },
+      abandonPromptAdmission() {
+        const recovery = get().promptAdmissionRecovery;
+        if (!recovery || recovery.phase === "submitting") return;
+        set({
+          liveMessages: get().liveMessages.filter(
+            (entry) => entry.key !== recovery.optimisticKey,
+          ),
+          notice: null,
+          promptAdmissionRecovery: null,
+        });
+      },
+      acknowledgePromptAdmissionResolution(commandId) {
+        if (get().promptAdmissionResolution?.commandId !== commandId) return;
+        set({ promptAdmissionResolution: null });
       },
       async discoverCommands() {
         const state = get();
@@ -1516,6 +1724,8 @@ export function createWebStore(
       thinkingStarts: {},
       thinkingDurations: {},
       promptAdmissionPending: false,
+      promptAdmissionRecovery: null,
+      promptAdmissionResolution: null,
       sessionSwitching: false,
       scrollToBottom: 0,
       thinkingPendingLevel: null,
