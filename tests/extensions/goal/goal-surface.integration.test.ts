@@ -18,6 +18,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 
+import { createGoalSnapshot } from "../../../extensions/goal/state.ts";
+
 const CAPABILITIES_EXTENSION = fileURLToPath(
   new URL("../../../extensions/capabilities/index.ts", import.meta.url),
 );
@@ -292,8 +294,15 @@ test("real Pi fixture: fork restores get_goal/update_goal but defers continuatio
 
   try {
     await session.bindExtensions({ mode: "rpc" });
-    await session.prompt("/goal 修复分支目标");
-    await session.waitForIdle();
+    sessionManager.appendCustomEntry(
+      "session-goal",
+      createGoalSnapshot(
+        { objective: "修复分支目标" },
+        0,
+        Date.now(),
+        "goal_fork_fixture",
+      ),
+    );
 
     // Emit session_start with reason: "fork"
     await session.extensionRunner.emit({

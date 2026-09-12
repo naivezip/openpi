@@ -406,7 +406,7 @@ export default function sessionGoal(pi: ExtensionAPI) {
 
   pi.on("session_start", async (event, ctx) => {
     controller.restore(ctx, event.reason === "fork");
-    if (controller.snapshot()) showLifecycleTools();
+    if (controller.snapshot()?.status === "active") showLifecycleTools();
     else hideLifecycleTools();
     if (controller.problem()) {
       notify(
@@ -441,7 +441,7 @@ export default function sessionGoal(pi: ExtensionAPI) {
 
   pi.on("session_tree", (_event, ctx) => {
     controller.restore(ctx, true);
-    if (controller.snapshot()) showLifecycleTools();
+    if (controller.snapshot()?.status === "active") showLifecycleTools();
     else hideLifecycleTools();
     updateUi(ctx);
   });

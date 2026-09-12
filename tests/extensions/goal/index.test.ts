@@ -514,3 +514,48 @@ test("restored active goals auto-continue, stopped goals prompt, and forks defer
   await forked.emit("agent_settled");
   assert.equal(forked.messages.length, 1);
 });
+
+test("inactive restored goals keep lifecycle tools hidden until resume is accepted", async () => {
+  const active = createGoalSnapshot(
+    { objective: "Restore boundary" },
+    0,
+    1,
+    "goal_restore_boundary",
+  );
+  for (const status of ["complete", "paused", "blocked"] as const) {
+    const snapshot = transitionGoal(active, status, 2, "fixture");
+    const branch = [
+      { type: "custom", customType: "session-goal", data: snapshot },
+    ];
+    for (const event of ["session_start", "session_tree"]) {
+      const h = extensionHarness({ branch });
+      h.confirmations.push(false);
+      await h.emit(event, { reason: "reload" });
+      assert.equal(
+        h.activeTools().includes("get_goal"),
+        false,
+        `${status}/${event}`,
+      );
+      assert.equal(
+        h.activeTools().includes("update_goal"),
+        false,
+        `${status}/${event}`,
+      );
+      assert.equal(h.messages.length, 0);
+    }
+  }
+  const h = extensionHarness({
+    branch: [
+      {
+        type: "custom",
+        customType: "session-goal",
+        data: transitionGoal(active, "paused", 2, "fixture"),
+      },
+    ],
+  });
+  h.confirmations.push(true);
+  await h.emit("session_start", { reason: "reload" });
+  assert.ok(h.activeTools().includes("get_goal"));
+  assert.ok(h.activeTools().includes("update_goal"));
+  assert.equal(h.messages.length, 1);
+});
