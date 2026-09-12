@@ -95,6 +95,7 @@ export interface WebStoreState {
   pendingFollowUpsReceipt: number | null;
   draftModel: WebModelSummary | null;
   modelSelectionPending: boolean;
+  modelSearch: ModelSearchState;
   snapshot: WebSnapshot | null;
   cursor: number | null;
   selectedPath: string | null;
@@ -143,6 +144,8 @@ export interface WebStoreActions {
   archiveSession: (path: string) => Promise<void>;
   unarchiveSession: (path: string) => Promise<boolean>;
   selectModel: (value: string) => Promise<void>;
+  searchModels: (query: string) => Promise<void>;
+  clearModelSearch: () => void;
   selectThinking: (level: string) => void;
   cancelActiveTurn: () => Promise<void>;
   sendPrompt: (content: string) => Promise<boolean>;
@@ -154,6 +157,15 @@ export interface WebStoreActions {
   toggleSidebar: (narrow: boolean) => void;
   closeMobileSidebar: () => void;
   clearNotice: () => void;
+}
+
+export interface ModelSearchState {
+  query: string;
+  status: "idle" | "loading" | "ready" | "error";
+  models: WebModelSummary[];
+  totalMatches: number;
+  matchesOmitted: number;
+  error: string | null;
 }
 
 export interface WebStoreDependencies {
@@ -194,6 +206,8 @@ export function createWebStore(
   let refreshInFlight = false;
   let refreshPending = false;
   let streamController: AbortController | null = null;
+  let modelSearchController: AbortController | null = null;
+  let modelSearchGeneration = 0;
   let thinkingTarget: string | null = null;
   let thinkingSeq = 0;
   let thinkingInFlight = false;
@@ -228,6 +242,21 @@ export function createWebStore(
     thinkingDurations: {},
   });
 
+  const resetModelSearch = (): { modelSearch: ModelSearchState } => {
+    modelSearchGeneration++;
+    modelSearchController?.abort();
+    modelSearchController = null;
+    return {
+      modelSearch: {
+        query: "",
+        status: "idle",
+        models: [],
+        totalMatches: 0,
+        matchesOmitted: 0,
+        error: null,
+      },
+    };
+  };
   const emptyCommandDiscovery = (): CommandDiscoveryState => ({
     sessionId: null,
     status: "idle",
@@ -481,6 +510,7 @@ export function createWebStore(
       ].includes(event.type);
       set({ cursor: event.sequence });
 
+      if (event.type === "runtime_changed") set(resetModelSearch());
       if (event.type === "runtime_changed") clearCommandDiscovery();
 
       if (current.sessionSwitching && !sessionTransition) {
@@ -834,6 +864,7 @@ export function createWebStore(
               currentSession?.path ?? snapshot.selectedSession?.path ?? null,
             selectedWorkspace,
             snapshot,
+            ...resetModelSearch(),
           });
           acceptThinking();
           return true;
@@ -868,6 +899,7 @@ export function createWebStore(
         promptAdmission = null;
         set({
           ...resetLivePatch(),
+          ...resetModelSearch(),
           selectedWorkspace: path,
           workspaceDraft: true,
           sessionSwitching: false,
@@ -911,6 +943,7 @@ export function createWebStore(
         promptAdmission = null;
         set({
           ...resetLivePatch(),
+          ...resetModelSearch(),
           mobileSidebarOpen: false,
           promptAdmissionPending: false,
           selectedPath: null,
@@ -989,6 +1022,7 @@ export function createWebStore(
         if (!path) return;
         clearCommandDiscovery();
         set({
+          ...resetModelSearch(),
           workspaceDraft: false,
           draftModel: null,
           modelSelectionPending: false,
@@ -1073,9 +1107,10 @@ export function createWebStore(
           state.workspaceDraft ||
           (!sessionId && !state.snapshot?.currentSessionId)
         ) {
-          const model = state.snapshot?.models.find(
-            (item) => item.provider === provider && item.id === modelId,
-          );
+          const model = [
+            ...(state.snapshot?.models ?? []),
+            ...state.modelSearch.models,
+          ].find((item) => item.provider === provider && item.id === modelId);
           if (model) set({ draftModel: model, notice: null });
           return;
         }
@@ -1083,6 +1118,78 @@ export function createWebStore(
           return;
         resetThinking();
         await applyModel({ provider, id: modelId }, sessionEpoch, sessionId);
+      },
+      async searchModels(query) {
+        const normalized = query.trim();
+        if (!normalized) {
+          set(resetModelSearch());
+          return;
+        }
+        modelSearchController?.abort();
+        const controller = new AbortController();
+        modelSearchController = controller;
+        const generation = ++modelSearchGeneration;
+        const epoch = sessionEpoch;
+        const catalogGeneration = snapshotGeneration;
+        const sessionId = get().snapshot?.currentSessionId;
+        set({
+          modelSearch: {
+            query: normalized,
+            status: "loading",
+            models: [],
+            totalMatches: 0,
+            matchesOmitted: 0,
+            error: null,
+          },
+        });
+        try {
+          const result = await client.searchModels(
+            normalized,
+            sessionId,
+            controller.signal,
+          );
+          if (
+            controller.signal.aborted ||
+            epoch !== sessionEpoch ||
+            catalogGeneration !== snapshotGeneration ||
+            generation !== modelSearchGeneration
+          )
+            return;
+          set({
+            modelSearch: {
+              query: normalized,
+              status: "ready",
+              models: result.models,
+              totalMatches: result.totalMatches,
+              matchesOmitted: result.truncation.matchesOmitted,
+              error: null,
+            },
+          });
+        } catch (error) {
+          if (
+            controller.signal.aborted ||
+            epoch !== sessionEpoch ||
+            catalogGeneration !== snapshotGeneration ||
+            generation !== modelSearchGeneration
+          )
+            return;
+          set({
+            modelSearch: {
+              query: normalized,
+              status: "error",
+              models: [],
+              totalMatches: 0,
+              matchesOmitted: 0,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          });
+        } finally {
+          if (modelSearchController === controller)
+            modelSearchController = null;
+        }
+      },
+      clearModelSearch() {
+        set(resetModelSearch());
       },
       selectThinking(level) {
         const state = get();
@@ -1372,6 +1479,14 @@ export function createWebStore(
       workspaceDraft: false,
       draftModel: null,
       modelSelectionPending: false,
+      modelSearch: {
+        query: "",
+        status: "idle",
+        models: [],
+        totalMatches: 0,
+        matchesOmitted: 0,
+        error: null,
+      },
       collapsed: readStringSet(collapsedWorkspacesStorageKey),
       sidebarCollapsed: readBoolean(sidebarCollapsedStorageKey),
       mobileSidebarOpen: false,

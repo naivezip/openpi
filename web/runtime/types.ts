@@ -1,5 +1,6 @@
 import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import type {
+  WebModelSearchResult,
   WebCommandDiscoveryResult,
   WebModelSummary,
 } from "../protocol/types.ts";
@@ -136,6 +137,7 @@ export interface WebRuntimeController {
   ): Promise<WebSessionCreationResult>;
   switchSession(sessionPath: string): Promise<{ cancelled: boolean }>;
   listModels(): WebModelSummary[];
+  searchModels(query: string, limit?: number): WebModelSearchResult;
   listCommands?(): WebCommandDiscoveryResult;
   listProviderAuth?(): WebProviderAuthProjection;
   getThinkingState?(): WebThinkingProjection;

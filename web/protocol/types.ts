@@ -17,6 +17,9 @@ export const WEB_MAX_ARCHIVED_SESSION_PAGE = 50;
 export const WEB_MAX_ARCHIVED_SESSION_QUERY = 160;
 export const WEB_MAX_ARCHIVED_SESSION_CURSOR = 512;
 export const WEB_MAX_ARCHIVED_SESSION_SCAN = 5_000;
+export const WEB_MAX_MODEL_SEARCH_RESULTS = 50;
+export const WEB_MAX_MODEL_SEARCH_BYTES = 64 * 1024;
+export const WEB_MAX_MODEL_QUERY = 200;
 export const WEB_MAX_COMMANDS = 250;
 export const WEB_MAX_COMMAND_BYTES = 64 * 1024;
 export const WEB_MAX_COMMAND_NAME = 160;
@@ -66,6 +69,19 @@ export interface WebModelSummary {
   name: string;
   label: string;
   current: boolean;
+}
+
+export interface WebModelSearchResult {
+  models: WebModelSummary[];
+  totalAvailable: number;
+  totalMatches: number;
+  truncation: {
+    truncated: boolean;
+    matchesOmitted: number;
+    maxResults: number;
+    maxBytes: number;
+    bytes: number;
+  };
 }
 
 export interface WebCommandSummary {

@@ -30,7 +30,9 @@ import {
   type WebTurnCancellationResult,
   WebRuntimeRequestError,
 } from "./types.ts";
-import { projectMessage } from "../protocol/types.ts";
+import {
+  projectMessage,
+} from "../protocol/types.ts";
 import { elapsed, traceWeb } from "../trace.ts";
 import {
   applyHttpProxySettings,
@@ -49,6 +51,7 @@ import {
 import {
   projectWebTrustStatus,
 } from "./trust-status.ts";
+import { projectWebModelSearch } from "./model-discovery.ts";
 
 const STARTUP_TIMEOUT_MS = 15_000;
 const TURN_CANCELLATION_SETTLEMENT_TIMEOUT_MS = 10_000;
@@ -384,6 +387,10 @@ export class PiWebRuntime implements WebRuntimeController {
       label: model.name || `${model.provider}/${model.id}`,
       current: current?.provider === model.provider && current.id === model.id,
     }));
+  }
+
+  searchModels(query: string, limit?: number) {
+    return projectWebModelSearch(this.listModels(), query, limit);
   }
 
   listCommands() {

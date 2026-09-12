@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   WebCommandDiscoveryResult,
   WebEvent,
+  WebModelSearchResult,
   WebModelSummary,
   WebSnapshot,
   WebThinkingState,
@@ -158,6 +159,11 @@ class FakeClient extends WebClient {
     name: "model",
     current: true,
   });
+  modelSearchResults: Array<Promise<WebModelSearchResult>> = [];
+  modelSearchQueries: Array<{
+    query: string;
+    sessionId?: string;
+  }> = [];
   promptResult: Promise<CommandReceipt> = Promise.resolve({
     id: "prompt-1",
     accepted: true,
@@ -209,6 +215,29 @@ class FakeClient extends WebClient {
   override selectModel(provider: string, modelId: string, sessionId: string) {
     this.modelSelections.push({ provider, modelId, sessionId });
     return this.modelResult;
+  }
+
+  override searchModels(
+    query: string,
+    sessionId?: string,
+    _signal?: AbortSignal,
+  ) {
+    this.modelSearchQueries.push({ query, sessionId });
+    return (
+      this.modelSearchResults.shift() ??
+      Promise.resolve({
+        models: [],
+        totalAvailable: 0,
+        totalMatches: 0,
+        truncation: {
+          truncated: false,
+          matchesOmitted: 0,
+          maxResults: 50,
+          maxBytes: 64 * 1024,
+          bytes: 0,
+        },
+      })
+    );
   }
 
   override prompt(
@@ -429,6 +458,202 @@ describe("OpenPI Web store", () => {
     expect(store.getState().snapshot?.sessions[0]?.name).toBe("Newer");
     expect(store.getState().notice).toBeNull();
     expect(store.getState().connection).not.toBe("unavailable");
+  });
+
+  it("keeps only the newest model search result when responses settle out of order", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const oldResult = deferred<WebModelSearchResult>();
+    const newResult = deferred<WebModelSearchResult>();
+    client.modelSearchResults.push(oldResult.promise, newResult.promise);
+    const store = createWebStore(client);
+    await store.getState().actions.refreshSnapshot();
+
+    const oldSearch = store.getState().actions.searchModels("old");
+    await vi.waitFor(() => expect(client.modelSearchQueries).toHaveLength(1));
+    const newSearch = store.getState().actions.searchModels("new");
+    await vi.waitFor(() => expect(client.modelSearchQueries).toHaveLength(2));
+
+    newResult.resolve({
+      models: [
+        {
+          provider: "test",
+          id: "new-model",
+          name: "New model",
+          label: "New model",
+          current: false,
+        },
+      ],
+      totalAvailable: 2,
+      totalMatches: 1,
+      truncation: {
+        truncated: false,
+        matchesOmitted: 0,
+        maxResults: 50,
+        maxBytes: 64 * 1024,
+        bytes: 100,
+      },
+    });
+    await newSearch;
+
+    oldResult.resolve({
+      models: [
+        {
+          provider: "test",
+          id: "old-model",
+          name: "Old model",
+          label: "Old model",
+          current: false,
+        },
+      ],
+      totalAvailable: 2,
+      totalMatches: 1,
+      truncation: {
+        truncated: false,
+        matchesOmitted: 0,
+        maxResults: 50,
+        maxBytes: 64 * 1024,
+        bytes: 100,
+      },
+    });
+    await oldSearch;
+
+    expect(store.getState().modelSearch.query).toBe("new");
+    expect(store.getState().modelSearch.models[0]?.id).toBe("new-model");
+  });
+
+  it("clears a model search and rejects its late result after a workspace change", async () => {
+    const client = new FakeClient();
+    client.snapshots.push(Promise.resolve(snapshot()));
+    const result = deferred<WebModelSearchResult>();
+    client.modelSearchResults.push(result.promise);
+    const store = createWebStore(client);
+    await store.getState().actions.refreshSnapshot();
+
+    const searching = store.getState().actions.searchModels("remote");
+    await vi.waitFor(() => expect(client.modelSearchQueries).toHaveLength(1));
+    store.getState().actions.setWorkspace("/tmp/other");
+    result.resolve({
+      models: [
+        {
+          provider: "test",
+          id: "late-model",
+          name: "Late model",
+          label: "Late model",
+          current: false,
+        },
+      ],
+      totalAvailable: 1,
+      totalMatches: 1,
+      truncation: {
+        truncated: false,
+        matchesOmitted: 0,
+        maxResults: 50,
+        maxBytes: 64 * 1024,
+        bytes: 100,
+      },
+    });
+    await searching;
+
+    expect(store.getState().selectedWorkspace).toBe("/tmp/other");
+    expect(store.getState().modelSearch).toEqual({
+      query: "",
+      status: "idle",
+      models: [],
+      totalMatches: 0,
+      matchesOmitted: 0,
+      error: null,
+    });
+  });
+
+  it("clears model search results when a new snapshot is accepted for the same Session", async () => {
+    const client = new FakeClient();
+    const refreshed = snapshot();
+    refreshed.generatedAt = "2026-09-03T00:00:01Z";
+    client.snapshots.push(
+      Promise.resolve(snapshot()),
+      Promise.resolve(refreshed),
+    );
+    client.modelSearchResults.push(
+      Promise.resolve({
+        models: [
+          {
+            provider: "test",
+            id: "search-only-model",
+            name: "Search only model",
+            label: "Search only model",
+            current: false,
+          },
+        ],
+        totalAvailable: 251,
+        totalMatches: 1,
+        truncation: {
+          truncated: false,
+          matchesOmitted: 0,
+          maxResults: 50,
+          maxBytes: 64 * 1024,
+          bytes: 200,
+        },
+      }),
+    );
+    const store = createWebStore(client);
+    await store.getState().actions.refreshSnapshot();
+    await store.getState().actions.searchModels("search-only");
+    expect(store.getState().modelSearch.status).toBe("ready");
+
+    expect(await store.getState().actions.refreshSnapshot()).toBe(true);
+
+    expect(store.getState().snapshot?.currentSessionId).toBe("session-1");
+    expect(store.getState().modelSearch).toEqual({
+      query: "",
+      status: "idle",
+      models: [],
+      totalMatches: 0,
+      matchesOmitted: 0,
+      error: null,
+    });
+  });
+
+  it("rejects a model search result from an older same-Session snapshot generation", async () => {
+    const client = new FakeClient();
+    const refreshed = snapshot();
+    refreshed.generatedAt = "2026-09-03T00:00:01Z";
+    client.snapshots.push(
+      Promise.resolve(snapshot()),
+      Promise.resolve(refreshed),
+    );
+    const result = deferred<WebModelSearchResult>();
+    client.modelSearchResults.push(result.promise);
+    const store = createWebStore(client);
+    await store.getState().actions.refreshSnapshot();
+
+    const searching = store.getState().actions.searchModels("search-only");
+    await vi.waitFor(() => expect(client.modelSearchQueries).toHaveLength(1));
+    expect(await store.getState().actions.refreshSnapshot()).toBe(true);
+    result.resolve({
+      models: [
+        {
+          provider: "test",
+          id: "stale-model",
+          name: "Stale model",
+          label: "Stale model",
+          current: false,
+        },
+      ],
+      totalAvailable: 251,
+      totalMatches: 1,
+      truncation: {
+        truncated: false,
+        matchesOmitted: 0,
+        maxResults: 50,
+        maxBytes: 64 * 1024,
+        bytes: 200,
+      },
+    });
+    await searching;
+
+    expect(store.getState().modelSearch.status).toBe("idle");
+    expect(store.getState().modelSearch.models).toEqual([]);
   });
 
   it("falls back to the canonical active Session when a selected transcript is stale", async () => {

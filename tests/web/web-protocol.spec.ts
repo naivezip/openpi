@@ -254,6 +254,33 @@ it("retains the fragment entry for the separate Vite developer page", () => {
   }
 });
 
+it("requests a bounded model search for the current Session", async () => {
+  const fetcher = vi.fn().mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        models: [],
+        totalAvailable: 251,
+        totalMatches: 0,
+        truncation: {
+          truncated: false,
+          matchesOmitted: 0,
+          maxResults: 50,
+          maxBytes: 64 * 1024,
+          bytes: 2,
+        },
+      }),
+    ),
+  );
+  vi.stubGlobal("fetch", fetcher);
+
+  await new WebClient().searchModels("k", "session-1");
+
+  expect(fetcher).toHaveBeenCalledOnce();
+  expect(fetcher.mock.calls[0]?.[0]).toBe(
+    "/api/models?query=k&limit=50&sessionId=session-1",
+  );
+});
+
 it("posts a thinking level and reads the thinking projection", async () => {
   const fetcher = vi.fn(async (_path: string, options: RequestInit) => {
     const body =

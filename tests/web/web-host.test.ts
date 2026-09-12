@@ -9,6 +9,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { registerWebCapability } from "../../extensions/shared/web-observer-registry.ts";
 import { WebHost } from "../../web/host/web-host.ts";
+import { projectWebModelSearch } from "../../web/runtime/model-discovery.ts";
 import {
   type WebRuntimeController,
   type WebRuntimeEvent,
@@ -146,6 +147,8 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
         current: false,
       },
     ],
+    searchModels: (query, limit) =>
+      projectWebModelSearch(runtime.listModels(), query, limit),
     getProjectTrustStatus: () => ({
       source: "pi-project-trust",
       workspace: runtimeCwd,
@@ -424,7 +427,60 @@ test("serves workspaces through a runtime isolated from terminal sessions", asyn
       headers: authorized,
     });
     assert.equal(modelsResponse.status, 200);
-    assert.deepEqual((await modelsResponse.json()).models, snapshot.models);
+    const modelsText = await modelsResponse.text();
+    const modelsBody = JSON.parse(modelsText) as {
+      models: Array<{ provider: string; id: string }>;
+      totalMatches: number;
+      truncation: {
+        bytes: number;
+        matchesOmitted: number;
+        maxBytes: number;
+      };
+    };
+    assert.deepEqual(modelsBody.models, snapshot.models);
+    assert.equal(modelsBody.totalMatches, snapshot.models.length);
+    assert.equal(modelsBody.truncation.matchesOmitted, 0);
+    assert.equal(Buffer.byteLength(modelsText), modelsBody.truncation.bytes);
+    assert.ok(modelsBody.truncation.bytes <= modelsBody.truncation.maxBytes);
+    const filteredModels = await fetch(
+      `${launched.origin}/api/models?query=other&limit=1`,
+      { headers: authorized },
+    );
+    assert.equal(filteredModels.status, 200);
+    assert.deepEqual((await filteredModels.json()).models, [
+      snapshot.models[1],
+    ]);
+    const invalidQuery = await fetch(
+      `${launched.origin}/api/models?query=${"x".repeat(201)}`,
+      { headers: authorized },
+    );
+    assert.equal(invalidQuery.status, 400);
+    assert.equal((await invalidQuery.json()).code, "INVALID_MODEL_QUERY");
+    for (const invalidLimit of ["0", "51", "nope"]) {
+      const invalidLimitResponse = await fetch(
+        `${launched.origin}/api/models?limit=${invalidLimit}`,
+        { headers: authorized },
+      );
+      assert.equal(invalidLimitResponse.status, 400);
+      assert.equal(
+        (await invalidLimitResponse.json()).code,
+        "INVALID_MODEL_LIMIT",
+      );
+    }
+    const staleModelSession = await fetch(
+      `${launched.origin}/api/models?query=other&sessionId=another-session`,
+      { headers: authorized },
+    );
+    assert.equal(staleModelSession.status, 409);
+    assert.equal((await staleModelSession.json()).code, "SESSION_CHANGED");
+    assert.equal(
+      (
+        await fetch(`${launched.origin}/api/models`, {
+          headers: { Authorization: "Bearer invalid" },
+        })
+      ).status,
+      401,
+    );
     const trustResponse = await fetch(`${launched.origin}/api/trust`, {
       headers: authorized,
     });
@@ -939,6 +995,7 @@ test("serves terminal Sessions through a read-only bounded endpoint", async () =
     newSession: async () => ({ cancelled: false }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
+    searchModels: (query, limit) => projectWebModelSearch([], query, limit),
     setModel: async () => {
       throw new Error("not available");
     },
@@ -1072,6 +1129,7 @@ test("an unbound Host exposes no bootstrap Session and rejects prompt bypasses",
     newSession: async () => ({ cancelled: false }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
+    searchModels: (query, limit) => projectWebModelSearch([], query, limit),
     setModel: async () => {
       throw new Error("workspace required");
     },
@@ -1172,6 +1230,7 @@ test("returns accepted only after Pi admits the prompt", async () => {
     newSession: async () => ({ cancelled: false }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
+    searchModels: (query, limit) => projectWebModelSearch([], query, limit),
     setModel: async () => {
       throw new Error("Model is not available");
     },
@@ -1659,6 +1718,7 @@ function testRuntime(
     newSession: async () => ({ cancelled: false }),
     switchSession: async () => ({ cancelled: false }),
     listModels: () => [],
+    searchModels: (query, limit) => projectWebModelSearch([], query, limit),
     setModel: async () => {
       throw new Error("Model is not available");
     },

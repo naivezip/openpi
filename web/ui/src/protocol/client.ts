@@ -1,11 +1,13 @@
 import type { WebBackgroundTerminalDetail } from "../../../../extensions/shared/web-observer-registry.ts";
 import type { WebProjectTrustStatus } from "../../../runtime/trust-status.ts";
 import type { WebProviderAuthProjection } from "../../../runtime/types.ts";
-import type {
-  WebModelSummary,
-  WebSnapshot,
-  WebThinkingState,
-  WebCommandDiscoveryResult,
+import {
+  WEB_MAX_MODEL_SEARCH_RESULTS,
+  type WebModelSearchResult,
+  type WebModelSummary,
+  type WebSnapshot,
+  type WebThinkingState,
+  type WebCommandDiscoveryResult,
 } from "../../../protocol/types.ts";
 
 const tokenStorageKey = "openpi.web.token";
@@ -229,6 +231,17 @@ export class WebClient {
     return this.request<WebModelSummary>("/api/model", {
       method: "POST",
       body: JSON.stringify({ provider, modelId, sessionId }),
+    });
+  }
+
+  searchModels(query: string, sessionId?: string, signal?: AbortSignal) {
+    const params = new URLSearchParams({
+      query,
+      limit: String(WEB_MAX_MODEL_SEARCH_RESULTS),
+    });
+    if (sessionId) params.set("sessionId", sessionId);
+    return this.request<WebModelSearchResult>(`/api/models?${params}`, {
+      signal,
     });
   }
 
