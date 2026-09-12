@@ -2,9 +2,10 @@ import type { WebBackgroundTerminalDetail } from "../../../../extensions/shared/
 import type { WebProjectTrustStatus } from "../../../runtime/trust-status.ts";
 import type { WebProviderAuthProjection } from "../../../runtime/types.ts";
 import type {
-  WebCommandDiscoveryResult,
   WebModelSummary,
   WebSnapshot,
+  WebThinkingState,
+  WebCommandDiscoveryResult,
 } from "../../../protocol/types.ts";
 
 const tokenStorageKey = "openpi.web.token";
@@ -177,11 +178,20 @@ export class WebClient {
   }
 
   thinking(sessionId: string, signal: AbortSignal) {
-    return this.request<{
-      sessionId: string;
-      level: string;
-      available: readonly string[];
-    }>(`/api/thinking?sessionId=${encodeURIComponent(sessionId)}`, { signal });
+    return this.request<WebThinkingState & { sessionId: string }>(
+      `/api/thinking?sessionId=${encodeURIComponent(sessionId)}`,
+      { signal },
+    );
+  }
+
+  setThinkingLevel(sessionId: string, level: string) {
+    return this.request<WebThinkingState & { sessionId: string }>(
+      "/api/thinking",
+      {
+        method: "POST",
+        body: JSON.stringify({ sessionId, level }),
+      },
+    );
   }
 
   trust(sessionId: string, signal: AbortSignal) {

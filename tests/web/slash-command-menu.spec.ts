@@ -99,6 +99,7 @@ function renderComposer(
     turnCancellationPending: false,
     turnTerminalStatus: null,
     pendingFollowUpsReceipt: null,
+    thinkingPendingLevel: null,
     commandDiscovery: {
       sessionId: "session-1",
       status: "ready" as const,

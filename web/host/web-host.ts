@@ -21,6 +21,7 @@ import {
 } from "../adapter/pi-adapter.ts";
 import {
   jsonByteLength,
+  boundThinkingProjection,
   WEB_MAX_ARCHIVED_SESSION_PAGE,
   WEB_MAX_EVENT_BYTES,
   WEB_MAX_EVENTS,
@@ -45,6 +46,15 @@ const DEFAULT_SSE_HEARTBEAT_MS = 15_000;
 const SERVER_CLOSE_DRAIN_MS = 500;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const MAX_PROMPT_ADMISSIONS = 128;
+const THINKING_LEVELS = new Set([
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 const execFileAsync = promisify(execFile);
 
 type PromptAdmissionResponse = {
@@ -349,7 +359,8 @@ export class WebHost {
     if (pathname === "/api/turns/cancel") return true;
     return pathname.startsWith("/api/workspaces") ||
       pathname.startsWith("/api/sessions") ||
-      pathname === "/api/model";
+      pathname === "/api/model" ||
+      pathname === "/api/thinking";
   }
 
   private async drainLeaseSensitiveRequests() {
@@ -702,6 +713,51 @@ export class WebHost {
         cursor: this.sequence,
       });
     }
+    if (url.pathname === "/api/thinking" && request.method === "POST") {
+      const body = await this.readJson(request);
+      if (
+        typeof body.sessionId !== "string" ||
+        body.sessionId.length > 256 ||
+        typeof body.level !== "string" ||
+        !THINKING_LEVELS.has(body.level)
+      ) {
+        return this.json(response, 400, {
+          error: "sessionId and a valid level are required",
+        });
+      }
+      if (this.runtime.workspaceSelected !== true) {
+        return this.json(response, 409, {
+          code: "WORKSPACE_REQUIRED",
+          error: "Choose a workspace before using the Web runtime",
+        });
+      }
+      if (!this.runtime.setThinkingLevel) {
+        return this.json(response, 501, {
+          code: "THINKING_CONTROL_UNAVAILABLE",
+          error: "thinking control is unavailable",
+        });
+      }
+      try {
+        const projection = await this.runtime.setThinkingLevel(body.level, {
+          expectedSessionId: body.sessionId,
+        });
+        return this.json(response, 200, {
+          sessionId: body.sessionId,
+          ...boundThinkingProjection(projection),
+          revision: this.sequence,
+        });
+      } catch (error) {
+        const failure = this.runtimeRequestFailure(
+          error,
+          "THINKING_SELECTION_FAILED",
+          "thinking selection failed",
+        );
+        return this.json(response, failure.status, {
+          code: failure.code,
+          error: failure.error,
+        });
+      }
+    }
     if (request.method !== "GET") {
       return this.json(response, 405, { error: "method not allowed" });
     }
@@ -937,11 +993,32 @@ export class WebHost {
       }
       return this.json(response, 200, this.runtime.listProviderAuth());
     }
-    if (url.pathname === "/api/thinking")
-      return this.json(response, 200, {
-        sessionId: this.runtime.sessionManager.getSessionId(),
-        ...(this.runtime.getThinkingState?.() ?? { level: "unknown", available: [] }),
-      });
+    if (url.pathname === "/api/thinking") {
+      let sessionId = "";
+      try {
+        sessionId = this.runtime.sessionManager.getSessionId();
+        const projection = this.runtime.getThinkingState?.();
+        return this.json(response, 200, {
+          sessionId,
+          ...(projection
+            ? boundThinkingProjection(projection)
+            : {
+                level: "unknown",
+                available: [],
+                supported: false,
+              }),
+          revision: this.sequence,
+        });
+      } catch {
+        return this.json(response, 200, {
+          sessionId,
+          level: "unknown",
+          available: [],
+          supported: false,
+          revision: this.sequence,
+        });
+      }
+    }
     if (url.pathname === "/api/snapshot") {
       const cursor = this.sequence;
       const projection = await this.adapter.getSnapshot(
@@ -953,6 +1030,9 @@ export class WebHost {
         cursor,
         preferences: { theme: loadSetupConfig().ui.webTheme },
         ...projection,
+        thinking: projection.thinking
+          ? { ...projection.thinking, revision: this.sequence }
+          : undefined,
       };
       let finalBytes = jsonByteLength(snapshot);
       while (snapshot.truncation.bytes !== finalBytes) {

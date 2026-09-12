@@ -42,7 +42,8 @@ export type WebRuntimeRequestErrorCode =
   | "MODEL_NOT_AVAILABLE"
   | "SESSION_CONFLICT"
   | "PROMPT_REJECTED"
-  | "WORKSPACE_REQUIRED";
+  | "WORKSPACE_REQUIRED"
+  | "THINKING_LEVEL_NOT_AVAILABLE";
 
 export class WebRuntimeRequestError extends Error {
   readonly code: WebRuntimeRequestErrorCode;
@@ -93,6 +94,16 @@ export interface WebModelSelectionOptions {
   expectedSessionId?: string;
 }
 
+export interface WebThinkingSelectionOptions {
+  expectedSessionId?: string;
+}
+
+export interface WebThinkingProjection {
+  level: string;
+  available: readonly string[];
+  supported: boolean;
+}
+
 export interface WebSessionCreationOptions {
   commandId?: string;
 }
@@ -127,7 +138,11 @@ export interface WebRuntimeController {
   listModels(): WebModelSummary[];
   listCommands?(): WebCommandDiscoveryResult;
   listProviderAuth?(): WebProviderAuthProjection;
-  getThinkingState?(): { level: string; available: readonly string[] };
+  getThinkingState?(): WebThinkingProjection;
+  setThinkingLevel?(
+    level: string,
+    options?: WebThinkingSelectionOptions,
+  ): Promise<WebThinkingProjection>;
   setModel(
     provider: string,
     modelId: string,
